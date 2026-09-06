@@ -1,0 +1,129 @@
+{
+  "environment": {
+    "generated_at": "2026-09-06T15:08:03",
+    "machine": "WIN11",
+    "os": "Microsoft Windows 11 Pro build 26200.8037",
+    "architecture": "ARM64",
+    "cpu": "Apple silicon",
+    "logical_cpus": 4,
+    "ram_gb": 8,
+    "machine_model": "VMware, Inc. VMware20,1",
+    "virtual_machine": true,
+    "hypervisor_present": true,
+    "system_disk_media": "SSD",
+    "on_ac_power": "no battery (AC)",
+    "defender_realtime": "True",
+    "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+    "wpr_profile": "launchlab-nosampling.wprp",
+    "cpu_sampling": false,
+    "app_args": "",
+    "runs_per_config": 20,
+    "settle_seconds": 2,
+    "interleaved": true,
+    "alternate_tracing": true,
+    "configs": "arm64-warm \u003C- C:\\7z-arm64\\7z.exe [warm, ARM64]; x64-warm \u003C- C:\\7z-x64\\7z.exe [warm, x64]"
+  },
+  "configs": [
+    {
+      "config": "arm64-warm",
+      "n": 10,
+      "median_ms": 18.8,
+      "mad_ms": 0.27,
+      "p95_ms": 42.34,
+      "cv_percent": 35.16,
+      "flaky_runs": [
+        "1"
+      ],
+      "components_median_ms": {
+        "cpu_on_ms": 9.32,
+        "cpu_ms": 0,
+        "ready_ms": 0.78,
+        "wait_ms": 19.94,
+        "disk_service_ms": 0,
+        "hardfault_io_ms": 0
+      }
+    },
+    {
+      "config": "x64-warm",
+      "n": 10,
+      "median_ms": 33.92,
+      "mad_ms": 0.24,
+      "p95_ms": 70.26,
+      "cv_percent": 34.37,
+      "flaky_runs": [
+        "1",
+        "5"
+      ],
+      "components_median_ms": {
+        "cpu_on_ms": 22.7,
+        "cpu_ms": 0,
+        "ready_ms": 1.19,
+        "wait_ms": 33.64,
+        "disk_service_ms": 0,
+        "hardfault_io_ms": 0
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "baseline": "arm64-warm",
+      "config": "x64-warm",
+      "delta_median_ms": 15.12,
+      "ratio": 1.8,
+      "hodges_lehmann_ms": 15.14,
+      "component_deltas_ms": {
+        "cpu_on_ms": 13.38,
+        "cpu_ms": 0,
+        "ready_ms": 0.41,
+        "wait_ms": 13.7,
+        "disk_service_ms": 0,
+        "hardfault_io_ms": 0
+      }
+    }
+  ],
+  "flaky_runs": [
+    {
+      "config": "arm64-warm",
+      "run": "1",
+      "startup_ms": 42.34,
+      "delta_vs_median_ms": 23.54,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 14.71
+    },
+    {
+      "config": "x64-warm",
+      "run": "1",
+      "startup_ms": 70.26,
+      "delta_vs_median_ms": 36.35,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 18.33
+    },
+    {
+      "config": "x64-warm",
+      "run": "5",
+      "startup_ms": 62.82,
+      "delta_vs_median_ms": 28.91,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 42.84
+    }
+  ],
+  "attribution": {
+    "readying": {
+      "arm64-warm": {
+        "7z.exe": 9.75,
+        "conhost.exe": 8.28,
+        "MsMpEng.exe": 1.43,
+        "powershell.exe": 0.41,
+        "csrss.exe": 0.02
+      },
+      "x64-warm": {
+        "7z.exe": 19.67,
+        "conhost.exe": 8.2,
+        "XtaCache.exe": 3.43,
+        "MsMpEng.exe": 1.46,
+        "powershell.exe": 0.78,
+        "csrss.exe": 0.03
+      }
+    }
+  }
+}

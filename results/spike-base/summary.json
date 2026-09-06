@@ -1,0 +1,98 @@
+{
+  "environment": {
+    "generated_at": "2026-09-06T15:01:03",
+    "machine": "WIN11",
+    "os": "Microsoft Windows 11 Pro build 26200.8037",
+    "architecture": "ARM64",
+    "cpu": "Apple silicon",
+    "logical_cpus": 4,
+    "ram_gb": 8,
+    "machine_model": "VMware, Inc. VMware20,1",
+    "virtual_machine": true,
+    "hypervisor_present": true,
+    "system_disk_media": "SSD",
+    "on_ac_power": "no battery (AC)",
+    "defender_realtime": "True",
+    "power_plan": "Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)",
+    "wpr_profile": "launchlab-nosampling.wprp",
+    "cpu_sampling": false,
+    "app_args": "spike",
+    "runs_per_config": 12,
+    "settle_seconds": 1,
+    "interleaved": true,
+    "configs": "spike \u003C- C:\\lab\\launchlab\\src\\LaunchLab\\bin\\Release\\net8.0\\launchlab.exe [warm, ARM64]"
+  },
+  "configs": [
+    {
+      "config": "spike",
+      "n": 12,
+      "median_ms": 38.92,
+      "mad_ms": 0.33,
+      "p95_ms": 510.83,
+      "cv_percent": 170.92,
+      "flaky_runs": [
+        "1",
+        "4",
+        "10"
+      ],
+      "components_median_ms": {
+        "cpu_on_ms": 33.22,
+        "cpu_ms": 0,
+        "ready_ms": 1.38,
+        "wait_ms": 122.73,
+        "disk_service_ms": 0,
+        "hardfault_io_ms": 0
+      }
+    }
+  ],
+  "comparisons": [],
+  "flaky_runs": [
+    {
+      "config": "spike",
+      "run": "1",
+      "startup_ms": 510.83,
+      "delta_vs_median_ms": 471.91,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 3923.39
+    },
+    {
+      "config": "spike",
+      "run": "4",
+      "startup_ms": 43.85,
+      "delta_vs_median_ms": 4.92,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 20.87
+    },
+    {
+      "config": "spike",
+      "run": "10",
+      "startup_ms": 49.3,
+      "delta_vs_median_ms": 10.38,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 21.54
+    }
+  ],
+  "attribution": {
+    "disk_read_file": {
+      "spike": {
+        "C:\\Users\\user\\AppData\\Local\\Temp\\launchlab-4ad71e15\\fixed-spike\\launchlab.dll": 0
+      }
+    },
+    "disk_write_file": {
+      "spike": {
+        "C:\\Users\\user\\AppData\\Local\\Temp\\launchlab-4ad71e15\\fixed-spike\\launchlab.dll": 0
+      }
+    },
+    "readying": {
+      "spike": {
+        "launchlab.exe": 112.57,
+        "conhost.exe": 8.44,
+        "MsMpEng.exe": 1.43,
+        "powershell.exe": 0.34,
+        "csrss.exe": 0.02,
+        "System": 0,
+        "Idle": 0
+      }
+    }
+  }
+}
