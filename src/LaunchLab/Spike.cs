@@ -80,14 +80,13 @@ static class Spike
 
     static void WriteMegabytes(string path, int megabytes)
     {
-        var rng = new Random(1);
         var buffer = new byte[1024 * 1024];
+        // Filled once, not per megabyte: generating random bytes costs real CPU, and a
+        // negative control that injects an unknown amount of CPU alongside the write is
+        // no longer a control. Incompressible so no filesystem shortcut can absorb it.
+        new Random(1).NextBytes(buffer);
         using FileStream fs = File.Create(path);
-        for (int i = 0; i < megabytes; i++)
-        {
-            rng.NextBytes(buffer); // incompressible, so no filesystem compression shortcut
-            fs.Write(buffer, 0, buffer.Length);
-        }
+        for (int i = 0; i < megabytes; i++) fs.Write(buffer, 0, buffer.Length);
         fs.Flush(true); // to the device, not just the cache: otherwise there is no disk cost to find
     }
 }

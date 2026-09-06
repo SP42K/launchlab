@@ -46,6 +46,12 @@ param(
     # Produces no traces; appends wall-clock times to overhead.csv for the report to compare.
     [switch]$NoTrace,
 
+    # Trace every other run instead of every run. Comparing a traced batch against an
+    # untraced batch confounds the recorder's cost with whatever else differs between two
+    # batches - on a virtual machine, the idle state the recorder itself keeps the vCPU out
+    # of. Alternating within one loop removes the batch-level difference.
+    [switch]$AlternateTracing,
+
     # Recording profile. The default asks for CPU sampling; if the machine refuses it
     # (virtual machines commonly have no virtualised PMU) the runner falls back to the
     # no-sampling profile and records that fact in env.json rather than failing.
@@ -233,6 +239,7 @@ $env_ = [ordered]@{
     runs_per_config = $N
     settle_seconds  = $SettleSeconds
     interleaved     = $true
+    alternate_tracing = [bool]$AlternateTracing
     configs         = ($configs | ForEach-Object { "$($_.Name) <- $($_.Source) [$($_.Mode), $(Get-PeMachine $_.Source)]" }) -join '; '
 }
 Write-Utf8NoBom (Join-Path $OutDir 'env.json') ($env_ | ConvertTo-Json -Depth 4)
@@ -263,6 +270,9 @@ for ($i = 1; $i -le $N; $i++) {
         $done++
         $tag = '{0}-{1}-{2:d3}' -f ('c' + $c.Index), $c.Name, $i
         $etl = Join-Path $OutDir "$tag.etl"
+        # Alternate on the run index, not the running total: alternating on the total would
+        # hand every traced run to the first config and every untraced run to the second.
+        $traceThis = (-not $NoTrace) -and ((-not $AlternateTracing) -or ($i % 2 -eq 1))
 
         switch ($c.Mode) {
             'coldfile' { $exe = Copy-AppDir $c.Source (Join-Path $staging "cold-$tag") }
@@ -270,22 +280,22 @@ for ($i = 1; $i -le $N; $i++) {
             default    { $exe = $c.WarmCopy }
         }
 
-        if (-not $NoTrace) {
+        if ($traceThis) {
             $rc = Invoke-Wpr @('-start', $activeProfile, '-filemode')
             if ($rc -ne 0) { throw "wpr -start failed with $rc`n$script:wprOutput" }
         }
 
         $r = Invoke-Workload $exe
 
-        if (-not $NoTrace) {
+        if ($traceThis) {
             $rc = Invoke-Wpr @('-stop', $etl)
             if ($rc -ne 0) { throw "wpr -stop failed with $rc`n$script:wprOutput" }
         }
 
         # Wall clock of every run, traced or not, so the report can price the tracing itself.
-        Add-Utf8NoBom $overheadCsv ('{0},{1},{2},{3:F3}' -f $c.Name, $i, $(if ($NoTrace) { 0 } else { 1 }), $r.WallMs)
+        Add-Utf8NoBom $overheadCsv ('{0},{1},{2},{3:F3}' -f $c.Name, $i, $(if ($traceThis) { 1 } else { 0 }), $r.WallMs)
 
-        if (-not $NoTrace) { Write-Utf8NoBom "$etl.json" ([ordered]@{
+        if ($traceThis) { Write-Utf8NoBom "$etl.json" ([ordered]@{
             config   = $c.Name
             run      = $i
             pid      = $r.Id

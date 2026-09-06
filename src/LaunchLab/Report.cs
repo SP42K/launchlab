@@ -11,7 +11,7 @@ static class Report
 {
     // Diagnostic components. They overlap (disk service time happens inside wait time),
     // so they rank causes, they do not add up to startup_ms. The report says so out loud.
-    static readonly string[] Components = { "cpu_ms", "ready_ms", "wait_ms", "disk_service_ms", "hardfault_io_ms" };
+    static readonly string[] Components = { "cpu_on_ms", "cpu_ms", "ready_ms", "wait_ms", "disk_service_ms", "hardfault_io_ms" };
 
     public static int Run(string[] args)
     {
@@ -128,7 +128,9 @@ static class Report
                       "`ready_ms` and `wait_ms` are summed over every thread in the process, so on a multi-threaded " +
                       "workload they can legitimately exceed the wall-clock `startup_ms`.");
         if (!cpuSampling) sb.AppendLine();
-        if (!cpuSampling) sb.AppendLine("`cpu_ms` reads 0.0 below only because this machine could not record CPU samples.");
+        if (!cpuSampling) sb.AppendLine("`cpu_ms` reads 0.0 below only because this machine could not record CPU samples. " +
+                      "`cpu_on_ms` - time actually running on a processor, from the context switch data - is exact either way, " +
+                      "it just cannot be broken down by module without sampling.");
         sb.AppendLine();
         sb.Append("| config |");
         foreach (string c in Components) sb.Append($" {c} |");

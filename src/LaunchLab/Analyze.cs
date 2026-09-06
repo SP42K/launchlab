@@ -65,7 +65,8 @@ static class Analyze
                 F(r.DiskServiceMs), r.DiskIos.ToString(CultureInfo.InvariantCulture), F(r.DiskMb),
                 r.HardFaults.ToString(CultureInfo.InvariantCulture), F(r.HardFaultIoMs),
                 r.ImagesLoaded.ToString(CultureInfo.InvariantCulture),
-                F(Stats.Median(r.QueueDepths))));
+                F(Stats.Median(r.QueueDepths)),
+                F(r.CpuOnMs)));
 
             // Keep the top contributors of each kind. A full dump would be mostly noise.
             foreach (IGrouping<string, KeyValuePair<(string Kind, string Key), Bucket>> byKind
@@ -91,7 +92,7 @@ static class Analyze
 
         string runsCsv = Path.Combine(dir, "runs.csv");
         string attribCsv = Path.Combine(dir, "attrib.csv");
-        WriteLines(runsCsv, "config,run,etl,pid,image,startup_ms,wall_ms,cpu_ms,ready_ms,wait_ms,disk_service_ms,disk_ios,disk_mb,hardfaults,hardfault_io_ms,images_loaded,disk_qd_median", runs);
+        WriteLines(runsCsv, "config,run,etl,pid,image,startup_ms,wall_ms,cpu_ms,ready_ms,wait_ms,disk_service_ms,disk_ios,disk_mb,hardfaults,hardfault_io_ms,images_loaded,disk_qd_median,cpu_on_ms", runs);
         WriteLines(attribCsv, "config,run,kind,key,count,bytes,ms", attrib);
         Console.WriteLine($"wrote {runsCsv} ({runs.Count} runs) and {attribCsv} ({attrib.Count} rows)");
         return 0;
@@ -107,7 +108,7 @@ static class Analyze
     sealed class RunMetrics
     {
         public string Image;
-        public double StartupMs, CpuMs, ReadyMs, WaitMs, DiskServiceMs, DiskMb, HardFaultIoMs;
+        public double StartupMs, CpuMs, CpuOnMs, ReadyMs, WaitMs, DiskServiceMs, DiskMb, HardFaultIoMs;
         public int DiskIos, HardFaults, ImagesLoaded;
         public List<double> QueueDepths = new();
         public Dictionary<(string Kind, string Key), Bucket> Attribution = new();
@@ -172,6 +173,9 @@ static class Analyze
             {
                 if (a.Process == null || a.Process.Id != pid) continue;
                 double waitMs = Ms(a.WaitingDuration);
+                // Time actually running on a processor. Exact, and unlike CPU sampling it needs
+                // no PMU - so it is available on machines where cpu_ms is not.
+                r.CpuOnMs += Ms(a.Duration);
                 r.ReadyMs += Ms(a.ReadyDuration);
                 r.WaitMs += waitMs;
                 // Who unblocked this thread? This is WPA's Wait Analysis workflow, done in code.
