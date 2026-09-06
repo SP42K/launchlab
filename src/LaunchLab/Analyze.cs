@@ -1,4 +1,5 @@
-// Extracts one metrics row per ETL trace, attributed to a single process id.
+// Extracts one metrics row per ETL trace, attributed to a single process id,
+// plus a long-form attribution table naming the modules, files and processes involved.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -31,7 +32,7 @@ static class Analyze
         }
 
         var runs = new List<string>();
-        var modules = new List<string>();
+        var attrib = new List<string>();
 
         foreach (string etl in etls)
         {
@@ -63,11 +64,22 @@ static class Analyze
                 F(r.StartupMs), F(wallMs), F(r.CpuMs), F(r.ReadyMs), F(r.WaitMs),
                 F(r.DiskServiceMs), r.DiskIos.ToString(CultureInfo.InvariantCulture), F(r.DiskMb),
                 r.HardFaults.ToString(CultureInfo.InvariantCulture), F(r.HardFaultIoMs),
-                r.ImagesLoaded.ToString(CultureInfo.InvariantCulture)));
+                r.ImagesLoaded.ToString(CultureInfo.InvariantCulture),
+                F(Stats.Median(r.QueueDepths))));
 
-            foreach (KeyValuePair<string, double> kv in r.CpuMsByModule.OrderByDescending(kv => kv.Value).Take(15))
+            // Keep the top contributors of each kind. A full dump would be mostly noise.
+            foreach (IGrouping<string, KeyValuePair<(string Kind, string Key), Bucket>> byKind
+                     in r.Attribution.GroupBy(kv => kv.Key.Kind))
             {
-                modules.Add(string.Join(",", Csv(config), run.ToString(CultureInfo.InvariantCulture), Csv(kv.Key), F(kv.Value)));
+                foreach (KeyValuePair<(string Kind, string Key), Bucket> kv
+                         in byKind.OrderByDescending(kv => kv.Value.Ms).ThenByDescending(kv => kv.Value.Count).Take(15))
+                {
+                    attrib.Add(string.Join(",",
+                        Csv(config), run.ToString(CultureInfo.InvariantCulture),
+                        Csv(kv.Key.Kind), Csv(kv.Key.Key),
+                        kv.Value.Count.ToString(CultureInfo.InvariantCulture),
+                        F(kv.Value.Bytes), F(kv.Value.Ms)));
+                }
             }
         }
 
@@ -78,11 +90,18 @@ static class Analyze
         }
 
         string runsCsv = Path.Combine(dir, "runs.csv");
-        string modulesCsv = Path.Combine(dir, "modules.csv");
-        WriteLines(runsCsv, "config,run,etl,pid,image,startup_ms,wall_ms,cpu_ms,ready_ms,wait_ms,disk_service_ms,disk_ios,disk_mb,hardfaults,hardfault_io_ms,images_loaded", runs);
-        WriteLines(modulesCsv, "config,run,module,cpu_ms", modules);
-        Console.WriteLine($"wrote {runsCsv} ({runs.Count} runs) and {modulesCsv}");
+        string attribCsv = Path.Combine(dir, "attrib.csv");
+        WriteLines(runsCsv, "config,run,etl,pid,image,startup_ms,wall_ms,cpu_ms,ready_ms,wait_ms,disk_service_ms,disk_ios,disk_mb,hardfaults,hardfault_io_ms,images_loaded,disk_qd_median", runs);
+        WriteLines(attribCsv, "config,run,kind,key,count,bytes,ms", attrib);
+        Console.WriteLine($"wrote {runsCsv} ({runs.Count} runs) and {attribCsv} ({attrib.Count} rows)");
         return 0;
+    }
+
+    sealed class Bucket
+    {
+        public long Count;
+        public double Bytes;
+        public double Ms;
     }
 
     sealed class RunMetrics
@@ -90,7 +109,17 @@ static class Analyze
         public string Image;
         public double StartupMs, CpuMs, ReadyMs, WaitMs, DiskServiceMs, DiskMb, HardFaultIoMs;
         public int DiskIos, HardFaults, ImagesLoaded;
-        public Dictionary<string, double> CpuMsByModule = new(StringComparer.OrdinalIgnoreCase);
+        public List<double> QueueDepths = new();
+        public Dictionary<(string Kind, string Key), Bucket> Attribution = new();
+
+        public void Add(string kind, string key, double ms = 0, double bytes = 0, long count = 1)
+        {
+            var k = (kind, string.IsNullOrEmpty(key) ? "<unknown>" : key);
+            if (!Attribution.TryGetValue(k, out Bucket b)) Attribution[k] = b = new Bucket();
+            b.Count += count;
+            b.Bytes += bytes;
+            b.Ms += ms;
+        }
     }
 
     static RunMetrics Measure(string etlPath, int pid)
@@ -133,9 +162,7 @@ static class Analyze
                 if (s.Process == null || s.Process.Id != pid) continue;
                 double ms = Ms(s.Weight);
                 r.CpuMs += ms;
-                string module = s.Image?.FileName ?? "<unknown>";
-                r.CpuMsByModule.TryGetValue(module, out double acc);
-                r.CpuMsByModule[module] = acc + ms;
+                r.Add("module", s.Image?.FileName, ms);
             }
         }
 
@@ -144,8 +171,11 @@ static class Analyze
             foreach (ICpuThreadActivity a in pScheduling.Result.ThreadActivity)
             {
                 if (a.Process == null || a.Process.Id != pid) continue;
+                double waitMs = Ms(a.WaitingDuration);
                 r.ReadyMs += Ms(a.ReadyDuration);
-                r.WaitMs += Ms(a.WaitingDuration);
+                r.WaitMs += waitMs;
+                // Who unblocked this thread? This is WPA's Wait Analysis workflow, done in code.
+                if (waitMs > 0) r.Add("readying", a.ReadyingProcess?.ImageName, waitMs);
             }
         }
 
@@ -154,9 +184,14 @@ static class Analyze
             foreach (IDiskActivity d in pDisk.Result.Activity)
             {
                 if (d.IssuingProcess == null || d.IssuingProcess.Id != pid) continue;
+                double ms = Ms(d.DiskServiceDuration);
+                double bytes = Bytes(d.Size);
                 r.DiskIos++;
-                r.DiskServiceMs += Ms(d.DiskServiceDuration);
-                r.DiskMb += Bytes(d.Size) / (1024.0 * 1024.0);
+                r.DiskServiceMs += ms;
+                r.DiskMb += bytes / (1024.0 * 1024.0);
+                r.QueueDepths.Add(Convert.ToDouble(d.QueueDepthAtInitializeTime));
+                // Naming the file is what turns "disk cost 200 ms" into something an owner can act on.
+                r.Add($"disk_{Str(d.IOType).ToLowerInvariant()}_file", d.Path ?? d.FileName, ms, bytes);
             }
         }
 
@@ -165,16 +200,18 @@ static class Analyze
             foreach (IHardFault f in pFaults.Result.Faults)
             {
                 if (f.FaultingProcess == null || f.FaultingProcess.Id != pid) continue;
+                double ms = Ms(f.IODuration);
                 r.HardFaults++;
-                r.HardFaultIoMs += Ms(f.IODuration);
+                r.HardFaultIoMs += ms;
+                r.Add("hardfault_file", f.Path ?? f.FileName, ms, Bytes(f.Size));
             }
         }
 
         return r;
     }
 
-    // The SDK exposes durations/timestamps as four shapes (value or nullable, trace-relative or raw).
-    // Overloads let every call site read the same, whichever shape a given property happens to be.
+    // The SDK exposes durations/timestamps as several shapes (value or nullable, trace-relative,
+    // raw, or plain TimeSpan). Overloads let every call site read the same, whichever shape it is.
     static double Ms(Duration d) => (double)d.TotalMilliseconds;
     static double Ms(Duration? d) => d.HasValue ? (double)d.Value.TotalMilliseconds : 0;
     static double Ms(TraceDuration d) => (double)d.TotalMilliseconds;
@@ -188,7 +225,9 @@ static class Analyze
     static double Bytes(DataSize s) => (double)s.Bytes;
     static double Bytes(DataSize? s) => s.HasValue ? (double)s.Value.Bytes : 0;
 
-    static string F(double v) => v.ToString("F3", CultureInfo.InvariantCulture);
+    static string Str(object o) => o?.ToString() ?? "unknown";
+
+    static string F(double v) => double.IsNaN(v) ? "0.000" : v.ToString("F3", CultureInfo.InvariantCulture);
 
     static string Csv(string s)
     {

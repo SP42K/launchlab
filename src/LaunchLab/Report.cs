@@ -29,8 +29,8 @@ static class Report
             return 1;
         }
 
-        string modulesPath = Path.Combine(dir, "modules.csv");
-        List<Dictionary<string, string>> moduleRows = File.Exists(modulesPath) ? ReadCsv(modulesPath) : new();
+        string attribPath = Path.Combine(dir, "attrib.csv");
+        List<Dictionary<string, string>> attribRows = File.Exists(attribPath) ? ReadCsv(attribPath) : new();
 
         string[] configs = rows.Select(r => r["config"]).Distinct().ToArray();
         string baseline = configs[0];
@@ -210,56 +210,89 @@ static class Report
         sb.AppendLine();
         summary["flaky_runs"] = flakyList;
 
-        // --- Module level CPU attribution -------------------------------------------------------
-        if (moduleRows.Count > 0)
+        // --- Attribution: which module, which file, which process ------------------------------
+        if (attribRows.Count > 0)
         {
-            sb.AppendLine("## CPU by module");
+            sb.AppendLine("## Attribution");
             sb.AppendLine();
-            sb.AppendLine("Median CPU sample weight per module, attributed by the image of the sampled instruction " +
-                          "(module level only, so no symbol server is needed).");
+            sb.AppendLine("Medians across the runs of each config. A key missing from a run counts as zero for that run, " +
+                          "so a cost that only appears occasionally does not masquerade as a typical one.");
             sb.AppendLine();
 
-            var medianByConfigModule = new Dictionary<string, Dictionary<string, double>>();
-            foreach (string cfg in configs)
-            {
-                var perModule = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-                foreach (IGrouping<string, Dictionary<string, string>> g in moduleRows.Where(r => r["config"] == cfg).GroupBy(r => r["module"]))
-                    perModule[g.Key] = Stats.Median(g.Select(r => Num(r, "cpu_ms")));
-                medianByConfigModule[cfg] = perModule;
+            var attribution = new Dictionary<string, object>();
+            var runCount = configs.ToDictionary(c => c, c => rows.Count(r => r["config"] == c));
 
-                sb.AppendLine($"**{cfg}** - top 10 modules:");
-                sb.AppendLine();
-                sb.AppendLine("| module | median cpu ms |");
-                sb.AppendLine("|---|---:|");
-                foreach (KeyValuePair<string, double> kv in perModule.OrderByDescending(kv => kv.Value).Take(10))
-                    sb.AppendLine($"| `{kv.Key}` | {N(kv.Value)} |");
-                sb.AppendLine();
-            }
-
-            if (configs.Length > 1)
+            foreach ((string kind, string title, string unit, bool movers) in new[]
             {
-                foreach (string cfg in configs.Skip(1))
+                ("module", "CPU by module", "median cpu ms", true),
+                ("disk_read_file", "Disk read service time by file", "median service ms", true),
+                ("disk_write_file", "Disk write service time by file", "median service ms", false),
+                ("hardfault_file", "Hard fault I/O by file", "median io ms", false),
+                ("readying", "Wait time by readying process", "median wait ms", false),
+            })
+            {
+                List<Dictionary<string, string>> kindRows = attribRows.Where(r => r["kind"] == kind).ToList();
+                if (kindRows.Count == 0) continue;
+
+                sb.AppendLine($"### {title}");
+                sb.AppendLine();
+
+                var medianByConfigKey = new Dictionary<string, Dictionary<string, double>>();
+                foreach (string cfg in configs)
                 {
-                    sb.AppendLine($"**`{cfg}` vs `{baseline}`** - modules that moved most:");
-                    sb.AppendLine();
-                    sb.AppendLine("| module | Δ median cpu ms |");
-                    sb.AppendLine("|---|---:|");
-                    IEnumerable<string> allModules = medianByConfigModule[cfg].Keys.Union(medianByConfigModule[baseline].Keys, StringComparer.OrdinalIgnoreCase);
-                    var moved = allModules
-                        .Select(m => (Module: m,
-                                      Delta: Get(medianByConfigModule[cfg], m) - Get(medianByConfigModule[baseline], m)))
-                        .OrderByDescending(x => Math.Abs(x.Delta))
-                        .Take(10)
-                        .ToList();
-                    foreach ((string module, double d) in moved)
-                        sb.AppendLine($"| `{module}` | {(d >= 0 ? "+" : "")}{N(d)} |");
-                    sb.AppendLine();
+                    var perKey = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+                    foreach (IGrouping<string, Dictionary<string, string>> g in kindRows.Where(r => r["config"] == cfg).GroupBy(r => r["key"]))
+                    {
+                        List<double> values = g.Select(r => Num(r, "ms")).ToList();
+                        // Pad with zeros for the runs this key never showed up in.
+                        while (values.Count < runCount[cfg]) values.Add(0);
+                        perKey[g.Key] = Stats.Median(values);
+                    }
+                    medianByConfigKey[cfg] = perKey;
 
-                    Dictionary<string, object> c = comparisons.FirstOrDefault(x => (string)x["config"] == cfg);
-                    if (c != null)
-                        c["top_module_movers"] = moved.ToDictionary(x => x.Module, x => Round(x.Delta));
+                    if (perKey.Count == 0) continue;
+                    sb.AppendLine($"**{cfg}** - top 10:");
+                    sb.AppendLine();
+                    sb.AppendLine($"| key | {unit} |");
+                    sb.AppendLine("|---|---:|");
+                    foreach (KeyValuePair<string, double> kv in perKey.OrderByDescending(kv => kv.Value).Take(10))
+                        sb.AppendLine($"| `{kv.Key}` | {N(kv.Value)} |");
+                    sb.AppendLine();
+                }
+
+                attribution[kind] = medianByConfigKey.ToDictionary(
+                    kv => kv.Key,
+                    kv => (object)kv.Value.OrderByDescending(x => x.Value).Take(10).ToDictionary(x => x.Key, x => Round(x.Value)));
+
+                if (movers && configs.Length > 1)
+                {
+                    foreach (string cfg in configs.Skip(1))
+                    {
+                        IEnumerable<string> allKeys = medianByConfigKey[cfg].Keys
+                            .Union(medianByConfigKey[baseline].Keys, StringComparer.OrdinalIgnoreCase);
+                        var moved = allKeys
+                            .Select(k => (Key: k, Delta: Get(medianByConfigKey[cfg], k) - Get(medianByConfigKey[baseline], k)))
+                            .Where(x => Math.Abs(x.Delta) > 0.0001)
+                            .OrderByDescending(x => Math.Abs(x.Delta))
+                            .Take(10)
+                            .ToList();
+                        if (moved.Count == 0) continue;
+
+                        sb.AppendLine($"**`{cfg}` vs `{baseline}`** - biggest movers:");
+                        sb.AppendLine();
+                        sb.AppendLine($"| key | Δ {unit} |");
+                        sb.AppendLine("|---|---:|");
+                        foreach ((string key, double d) in moved)
+                            sb.AppendLine($"| `{key}` | {(d >= 0 ? "+" : "")}{N(d)} |");
+                        sb.AppendLine();
+
+                        Dictionary<string, object> c = comparisons.FirstOrDefault(x => (string)x["config"] == cfg);
+                        if (c != null) c["top_" + kind + "_movers"] = moved.ToDictionary(x => x.Key, x => Round(x.Delta));
+                    }
                 }
             }
+
+            summary["attribution"] = attribution;
         }
 
         string reportPath = Path.Combine(dir, "report.md");

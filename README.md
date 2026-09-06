@@ -46,6 +46,16 @@ contributors rather than summing to `startup_ms`. The report states this where t
 Module attribution uses `ICpuSample.Image`, the image of the sampled instruction, so it needs
 **no symbol server and no PDBs**. Function-level analysis is what WPA is for.
 
+`attrib.csv` goes one level further and names the participants, because "disk cost 200 ms" is not
+something an owner can act on and "200 ms of it was reading *this file*" is:
+
+| kind | key | answers |
+|---|---|---|
+| `module` | image name | which module burned the CPU |
+| `disk_read_file` / `disk_write_file` | file path | which file the storage time went to |
+| `hardfault_file` | file path | what was being paged in |
+| `readying` | process image | who unblocked the waiting thread (WPA's Wait Analysis, in code) |
+
 ## Methodology
 
 The parts that separate this from a stopwatch loop:
@@ -82,7 +92,8 @@ dotnet run --project src\LaunchLab -- analyze results
 dotnet run --project src\LaunchLab -- report results
 ```
 
-Outputs land in `results/`: `runs.csv`, `modules.csv`, `report.md`, `summary.json`.
+Outputs land in `results/`: `runs.csv` (one row per run), `attrib.csv` (long-form attribution),
+`report.md`, `summary.json`.
 
 Comparing native ARM64 against x64-under-emulation on a Windows on Arm machine is the same
 pipeline with two apps:
