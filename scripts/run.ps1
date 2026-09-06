@@ -88,6 +88,29 @@ function Invoke-Wpr([string[]]$WprArgs) {
     } finally { $ErrorActionPreference = $prev }
 }
 
+function Invoke-Workload([string]$Exe) {
+    # Warm-up and measured runs go through this one path, so they are always the same
+    # command line. Output goes through pipes, never files: redirecting to a temp file would
+    # make the workload write to disk on the harness's behalf, and that write would land in
+    # the workload's own disk attribution - the measurement tool contaminating its subject.
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    if ($AppArgs) { $psi.Arguments = $AppArgs }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $p = [Diagnostics.Process]::Start($psi)
+    # Drain before waiting: a full pipe buffer would block the child and be measured as its cost.
+    $p.StandardOutput.ReadToEnd() | Out-Null
+    $p.StandardError.ReadToEnd() | Out-Null
+    $p.WaitForExit()
+    $sw.Stop()
+    [pscustomobject]@{ Id = $p.Id; WallMs = $sw.Elapsed.TotalMilliseconds }
+}
+
 function Add-Utf8NoBom([string]$Path, [string]$Line) {
     [IO.File]::AppendAllText($Path, $Line + "`n", (New-Object Text.UTF8Encoding($false)))
 }
@@ -222,7 +245,7 @@ Write-Host ("estimated wall clock: ~{0:N0} min" -f ($total * ($SettleSeconds + 6
 # OS-wide first-touch costs that have nothing to do with the config under test.
 if ($modes -notcontains 'coldxta') {
     foreach ($c in $configs | Group-Object Source | ForEach-Object { $_.Group[0] }) {
-        1..3 | ForEach-Object { if ($AppArgs) { & $c.Source $AppArgs *> $null } else { & $c.Source *> $null } }
+        1..3 | ForEach-Object { Invoke-Workload $c.Source | Out-Null }
     }
     # XtaCache writes its .JC translation files asynchronously; give it a moment to settle
     # so the warm arm really is warm.
@@ -252,24 +275,7 @@ for ($i = 1; $i -le $N; $i++) {
             if ($rc -ne 0) { throw "wpr -start failed with $rc`n$script:wprOutput" }
         }
 
-        # Output goes through pipes, never files. Redirecting to a temp file would make the
-        # workload write to disk on the harness's behalf, and that write lands in the
-        # workload's own disk attribution - the measurement tool contaminating its subject.
-        $psi = New-Object Diagnostics.ProcessStartInfo
-        $psi.FileName = $exe
-        if ($AppArgs) { $psi.Arguments = $AppArgs }
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
-        $psi.CreateNoWindow = $true
-
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $p = [Diagnostics.Process]::Start($psi)
-        # Drain before waiting: a full pipe buffer would block the child and be measured as its cost.
-        $p.StandardOutput.ReadToEnd() | Out-Null
-        $p.StandardError.ReadToEnd() | Out-Null
-        $p.WaitForExit()
-        $sw.Stop()
+        $r = Invoke-Workload $exe
 
         if (-not $NoTrace) {
             $rc = Invoke-Wpr @('-stop', $etl)
@@ -277,19 +283,19 @@ for ($i = 1; $i -le $N; $i++) {
         }
 
         # Wall clock of every run, traced or not, so the report can price the tracing itself.
-        Add-Utf8NoBom $overheadCsv ('{0},{1},{2},{3:F3}' -f $c.Name, $i, $(if ($NoTrace) { 0 } else { 1 }), $sw.Elapsed.TotalMilliseconds)
+        Add-Utf8NoBom $overheadCsv ('{0},{1},{2},{3:F3}' -f $c.Name, $i, $(if ($NoTrace) { 0 } else { 1 }), $r.WallMs)
 
         if (-not $NoTrace) { Write-Utf8NoBom "$etl.json" ([ordered]@{
             config   = $c.Name
             run      = $i
-            pid      = $p.Id
+            pid      = $r.Id
             exe      = $exe
             mode     = $c.Mode
-            wall_ms  = [math]::Round($sw.Elapsed.TotalMilliseconds, 3)
+            wall_ms  = [math]::Round($r.WallMs, 3)
             started  = (Get-Date).ToString('s')
         } | ConvertTo-Json -Compress) }
 
-        Write-Host ("[{0,3}/{1}] {2,-24} pid {3,-6} wall {4,7:N1} ms" -f $done, $total, $c.Name, $p.Id, $sw.Elapsed.TotalMilliseconds)
+        Write-Host ("[{0,3}/{1}] {2,-24} pid {3,-6} wall {4,7:N1} ms" -f $done, $total, $c.Name, $r.Id, $r.WallMs)
         Start-Sleep -Seconds $SettleSeconds
     }
 }
