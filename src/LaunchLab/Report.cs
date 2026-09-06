@@ -344,17 +344,22 @@ static class Report
             summary["attribution"] = attribution;
         }
 
+        // These two files are committed, so they get LF on every platform. AppendLine and
+        // JsonSerializer's indentation both emit CRLF on Windows, which would otherwise rewrite
+        // every line of every report each time one is regenerated there.
         string reportPath = Path.Combine(dir, "report.md");
-        File.WriteAllText(reportPath, sb.ToString(), new UTF8Encoding(false));
+        WriteUtf8Lf(reportPath, sb.ToString());
 
         string summaryPath = Path.Combine(dir, "summary.json");
-        File.WriteAllText(summaryPath,
-            JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }),
-            new UTF8Encoding(false));
+        WriteUtf8Lf(summaryPath,
+            JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
 
         Console.WriteLine($"wrote {reportPath} and {summaryPath}");
         return 0;
     }
+
+    static void WriteUtf8Lf(string path, string text) =>
+        File.WriteAllText(path, text.Replace("\r\n", "\n"), new UTF8Encoding(false));
 
     static double Get(Dictionary<string, double> d, string key) => d.TryGetValue(key, out double v) ? v : 0;
 

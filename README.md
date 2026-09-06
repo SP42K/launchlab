@@ -7,25 +7,40 @@ In-box `wpr` records one trace per launch against a purpose-built profile. A .NE
 built on the [TraceProcessing SDK](https://www.nuget.org/packages/Microsoft.Windows.EventTracing.Processing.All)
 extracts per-run metrics from every trace. A report ranks the contributors and flags the
 runs that were not like the others. A `compare` gate turns two runs into a pass/fail with an
-exit code.
+exit code. And because an analyzer that agrees only with itself proves nothing, a `crossval`
+step re-reads every trace with `wpaexporter` and `xperf` and diffs the two — **148 traces, five
+metrics, agreement to the microsecond on four of them** (§9).
 
 > **中文摘要**：用 Windows 內建的 `wpr` 錄下每一次啟動的 ETW trace，再用 TraceProcessing SDK
 > 程式化地抽出「啟動耗時」與它的組成（實際佔用 CPU 的時間、排程等待、磁碟服務時間、硬缺頁），
 > 交錯執行 A/B 以排除漂移，用中位數與 MAD 而非平均與標準差來偵測不穩定的量測。
+> 再用微軟自己的 WPA (`wpaexporter`) 與 `xperf` 重讀同一批 trace 做交叉驗證：148 份 trace、
+> 五個指標，其中四個逐微秒相符，不符的那一個也照實寫出來。
 > 下面每一個數字都是這套工具實際跑出來的。
 
-Everything below was measured with this harness. The environment is disclosed with every
-result, and `results/report.md` is generated, never hand-written.
+Everything below was measured with this harness, on two machines. The environment is disclosed
+with every result, and `results/report.md` is generated, never hand-written.
 
 ---
 
 ## What was measured
 
-**Machine:** Windows 11 Pro ARM64, build 26200.8037, running as a VMware Fusion guest on
-Apple silicon — 4 vCPU, 8 GB, SSD, Defender real-time protection **on**, Balanced power plan.
-**Workload:** 7-Zip 26.03, the arm64 build and the x64 build of the same release, invoked so
-that they start, print usage, and exit. On Windows on Arm the x64 build runs under Prism
-emulation; the arm64 build does not. That is the only difference between the two arms.
+Two machines, the same harness on both:
+
+| | machine A (§1–§5, §7) | machine B (§6) |
+|---|---|---|
+| | Windows 11 Pro **ARM64** 26200.8037 | Windows 11 Pro **x64** 26200.9278 |
+| | VMware Fusion guest on Apple silicon | physical, Ryzen 5 3600 |
+| | 4 vCPU, 8 GB, SSD | 12 logical CPUs, 32 GB, SSD |
+| CPU sampling | unavailable (no virtualised PMU) | available |
+| arms | arm64 native vs x64 under Prism | x64 native vs x86 under WOW64 |
+
+Defender real-time protection is **on** for every result below, and every environment fact the
+report prints is recorded by the harness at capture time, not typed in afterwards.
+
+**Workload:** 7-Zip 26.03 — two builds of the same release, invoked so that they start, print
+usage, and exit. The build's target architecture is the only difference between the arms, and
+the harness reads it out of the PE header rather than trusting the path.
 
 **Metric:** `startup_ms` = process create → process exit, both timestamps taken from the
 kernel process events inside the trace.
@@ -125,7 +140,58 @@ The settle time added *for* measurement rigour was the largest single confound i
 experiment, and it is more than twice the effect under study. Interleaving is what saves the
 comparison: every arm pays the same idle.
 
-### 6. The harness knows what the machine cannot measure
+### 6. The same method on a second machine finds a second, smaller translation tax
+
+**Machine:** Windows 11 Pro x64, build 26200.9278, on a Ryzen 5 3600 — 12 logical CPUs,
+32 GB, SSD, Defender real-time protection **on**, AMD Ryzen High Performance power plan.
+Physical, not a guest: the harness records `virtual_machine: false` while still reporting
+`hypervisor_present: true` — the two are not the same claim, and a hypervisor running under a
+physical Windows install is worth disclosing rather than flattening into "bare metal".
+**Workload:** the same 7-Zip 26.03 release — the x64 build against the 32-bit x86 build,
+which runs under WOW64. Same harness, same metric, n = 20 per arm, interleaved.
+
+| | arm64 vs x64-on-Arm (VM, Prism) | x64 vs x86-on-x64 (physical, WOW64) |
+|---|---:|---:|
+| baseline median | 20.8 ms | 18.2 ms |
+| translated median | 36.3 ms | 20.6 ms |
+| Hodges–Lehmann shift | **+15.5 ms** | **+2.5 ms** |
+| MAD of the baseline arm | 1.3 ms | **0.6 ms** |
+| CV of the baseline arm | 28.6 % | **8.7 %** |
+
+Two things fall out. The tax is real on both machines but an order of magnitude apart —
+whole-instruction-set emulation costs about six times what a 32-bit syscall thunk costs.
+And **the virtual machine's noise floor is roughly twice the physical machine's**, which is
+the more useful number: on the VM a 2.5 ms effect would have sat inside the MAD and been
+unmeasurable. The measurement environment decides what effects are visible at all.
+
+This machine has a PMU, so `wpr` accepted the sampling profile (`cpu_sampling: true`) and
+the CPU-by-module breakdown §7 could not produce on the VM is available here:
+
+| module | x64 median cpu ms | x86 median cpu ms | Δ |
+|---|---:|---:|---:|
+| `ntoskrnl.exe` | 4.6 | 6.5 | **+2.0** |
+| `ntdll.dll` | 1.5 | 3.0 | **+1.6** |
+
+`wow64.dll` shows up only in the x86 arm, as it must — but it is **not** where the time goes.
+The cost is in the kernel and in `ntdll`, i.e. the syscall thunk path plus the extra loader
+work: the x86 arm maps 22 images where the x64 arm maps 16. Sampling at 1 kHz over ~10 ms of
+CPU quantises each module to about ±1 ms, so these rank contributors rather than price them.
+
+Having a PMU also lets the two CPU measurements check each other. `cpu_on_ms` is exact and
+comes from context switches; `cpu_ms` is statistical and comes from sampling:
+
+| batch | config | `cpu_on_ms` (context switches) | `cpu_ms` (PMU sampling) | difference |
+|---|---|---:|---:|---:|
+| 20 ms launch | x64 | 8.8 | 7.9 | 0.9 |
+| 20 ms launch | x86 | 11.6 | 11.0 | 0.6 |
+| 35 ms hash | x64 | 24.9 | 24.2 | 0.7 |
+| 35 ms hash | x86 | 28.0 | 28.0 | 0.0 |
+
+They converge as the workload lengthens, which is what sampling error is supposed to do.
+That is the check that `cpu_on_ms` — the metric §2's decomposition rests on, and the one
+WPA would not export (§9) — measures what it claims to.
+
+### 7. The harness knows what the machine cannot measure
 
 `wpr -start` fails with `0x80070032` for any profile containing `SampledProfile` on this
 guest — no PMU is exposed, so `GeneralProfile`, `CPU`, `Registry`, `Minifilter` and `Power`
@@ -139,7 +205,7 @@ absent rather than printing an empty table that reads like "no CPU was used"**. 
 marked with what it could measure, so an analysis never silently compares a sampled run
 against an unsampled one.
 
-### 7. Does the analyzer actually work? A known cost, injected and recovered
+### 8. Does the analyzer actually work? A known cost, injected and recovered
 
 The harness measures itself: `spike` injects a **known** cost *inside the measured process* —
 work done by the runner would be charged to the runner and correctly ignored, so the check
@@ -157,6 +223,67 @@ The gate called it at **310× the baseline noise band**, ~93% of the cost landed
 time where the spin was, and the disk half was attributed by name to `C:\lab\spike.bin`
 (10.3 ms) — the exact file written. Both injected costs stayed separable.
 
+### 9. Do the numbers agree with WPA? 148 traces say yes, and name the one place they don't
+
+An analyzer that agrees only with itself proves nothing. `scripts/crossval.ps1` re-reads every
+trace with two independent Microsoft implementations and diffs the result against `runs.csv`:
+
+- **`wpaexporter.exe`** — WPA's own analysis engine, driven from the command line. Supplies
+  Ready, Waits, disk service time and bytes.
+- **`xperf.exe -a process`** — supplies process start and end, which is exactly what
+  `startup_ms` is.
+
+Nothing re-runs the workload. All three readers parse identical bytes, so a disagreement is an
+analysis bug, not measurement noise.
+
+| metric | compared against | traces | exact (≤ 1 µs) | largest disagreement |
+|---|---|---:|---:|---:|
+| `startup_ms` | `xperf -a process` | 148 | **148** | 0.001 ms (rounding) |
+| `ready_ms` | WPA CPU Usage (Precise) | 148 | **148** | 0.001 ms (rounding) |
+| `disk_service_ms` | WPA Disk Usage | 148 | **148** | 0 |
+| `disk_mb` | WPA Disk Usage | 148 | **148** | 0 |
+| `wait_ms` | WPA CPU Usage (Precise) | 148 | 139 | **2.72 ms** |
+
+Five batches across both machines; per-run pairs are in `results/*/crossval.csv`.
+
+**The first two bugs it found were mine, in the comparison itself.** `xperf` right-aligns the
+pid inside the parentheses — `7z.exe ( 512)` — so a substring match on `(512)` silently missed
+every process with a pid under four digits, and one run looked like a 20 ms disagreement when
+it was a 0 ms one. And WPA's Disk Usage table groups rows by (process, IO type, path), so its
+row count is not an IO count; comparing it against `disk_ios` was comparing two different
+things. Both are fixed, and both are the reason the table above reports what it does.
+
+**The one that is still open.** `wait_ms` differs on 9 of 148 runs: six by 5–9 µs, and three by
+0.54, 2.60 and 2.72 ms. What has been ruled out, in order:
+
+- *Not a missing context switch.* WPA counts 26 switch-ins for the worst run; so does the
+  analyzer. Both see the same set of events and disagree on the sum.
+- *Not the trace time range.* Re-exporting with `wpaexporter -range` clipped to the process
+  lifetime leaves WPA's `Waits` byte-identical, so it is not a windowing difference.
+- *Not an unresolved process association.* Falling back to the thread's process for activities
+  whose own process is null changes nothing; the diagnostic count of unknown waits does not
+  track the disagreement either.
+- *Not compensated by `ready_ms`.* Ready matches to the microsecond on the same runs, so the
+  time has not simply moved between two buckets.
+
+That leaves a single wait interval that the two implementations anchor differently. It is 0.4 %
+of one metric on 2 % of runs and it is written down here rather than rounded away, because a
+cross-check whose disagreements go unreported is not a cross-check.
+
+**What WPA would not give.** `cpu_on_ms` has no counterpart in this table. WPA's equivalent
+column exists — "CPU Usage (in view)" in the CPU Usage (Precise) table — but it is hidden in the
+stock preset, and `wpaexporter` uses a `.wpaProfile` only to choose *which tables* to export,
+falling back to each table's built-in preset for the columns regardless of what the profile
+says. The other table that does expose CPU time in milliseconds resolves stacks and takes
+minutes per trace. So `cpu_on_ms` is validated the other way instead — against PMU sampling on
+the physical machine, in §6.
+
+`scripts/make-crossval-profile.ps1` derives the export profile by trimming the `AppLaunch`
+profile that ships in the ADK catalog, rather than hand-authoring WPA's serialized view state.
+The same profile opens in the WPA GUI, on the same trace:
+
+![The same trace open in Windows Performance Analyzer](docs/img/wpa-crossval.png)
+
 ---
 
 ## How it works
@@ -168,6 +295,7 @@ launchlab analyze <dir>    ETL -> runs.csv (one row per run) + attrib.csv (long-
 launchlab report  <dir>    -> report.md + summary.json
 launchlab compare a.csv b.csv   regression gate, exit code 0 or 1
 launchlab spike            negative-control workload
+scripts/crossval.ps1 <dir> re-read the same ETLs with wpaexporter + xperf -> crossval.csv
 ```
 
 Per run, `runs.csv` carries `startup_ms`, `wall_ms`, `cpu_on_ms`, `cpu_ms`, `ready_ms`,
@@ -243,17 +371,33 @@ dotnet run --project src\LaunchLab -- selftest
 translation cache per run; `-NoTrace` runs without the recorder; `-AlternateTracing` traces
 every other run.
 
+To check the analyzer against Microsoft's own tools on the traces you just collected (§9), the
+Windows Performance Toolkit has to be installed — it is the one step that needs the ADK:
+
+```powershell
+# One-time: the toolkit, without the rest of the ADK
+adksetup.exe /features OptionId.WindowsPerformanceToolkit /quiet /ceip off
+
+# Re-read every trace with wpaexporter and xperf, diff against runs.csv
+.\scripts\crossval.ps1 -ResultsDir .\results\warm
+```
+
+That writes `crossval.csv` next to `runs.csv` and prints the per-metric agreement table.
+
 ## Known limitations
 
 - `startup_ms` measures a run-to-exit console workload, not GUI readiness.
 - Components overlap and are summed across threads; treat them as a ranking.
-- Every number here comes from one virtual machine. Absolute values are specific to it —
-  §1 shows they move with the harness's own choices. Compare arms measured on the same
-  machine in the same session; never absolute numbers across machines.
-- CPU-by-module is unavailable on this machine (§6), so the emulation tax is quantified but
-  not attributed to a module. That needs physical ARM64 hardware.
-- Not yet done: cross-validation screenshots against WPA on the same traces, a run on
-  physical x64 hardware, and boot-trace analysis.
+- Absolute values belong to the machine and the session that produced them — §1 shows they
+  move with the harness's own choices, and §6 shows the noise floor differs twofold between
+  the two machines. Compare arms measured together; never absolute numbers across machines.
+- CPU-by-module needs a PMU, so it exists for machine B and not for machine A (§7). The Prism
+  emulation tax is therefore quantified and decomposed by scheduling state, but not attributed
+  to a module. That needs physical ARM64 hardware, which this project does not have.
+- `wait_ms` disagrees with WPA on 9 of 148 traces, three of them by more than half a
+  millisecond, and the cause is not yet identified (§9).
+- Not yet done: boot-trace analysis (`wpr -boottrace`), and a WPA add-in built on
+  `Microsoft.Performance.SDK`.
 
 ## Layout
 
@@ -261,6 +405,8 @@ every other run.
 scripts/run.ps1                    scenario runner: cache state, wpr, one ETL + sidecar per run
 scripts/launchlab.wprp             recording profile: only the keywords the analyzer reads
 scripts/launchlab-nosampling.wprp  fallback for machines that cannot sample the CPU
+scripts/crossval.ps1               re-read the traces with wpaexporter + xperf, diff the result
+scripts/make-crossval-profile.ps1  derive the export profile from the ADK's AppLaunch profile
 src/LaunchLab/
   Analyze.cs   ETL -> per-run metrics and attribution (TraceProcessing SDK)
   Stats.cs     median, MAD, p95, CV, Hodges-Lehmann, outlier detection, self-check
@@ -268,4 +414,5 @@ src/LaunchLab/
   Compare.cs   regression gate with an exit code
   Spike.cs     negative-control workload
 docs/plans/                        the staged build plan this repo follows
+docs/img/                          the WPA screenshot referenced from §9
 ```

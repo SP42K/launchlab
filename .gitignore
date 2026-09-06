@@ -1,6 +1,7 @@
 bin/
 obj/
-results/*.etl
-results/*.etl.json
-results/*.ngenpdb/
+# Traces live in per-batch subdirectories, so these have to match at any depth.
+*.etl
+*.etl.json
+*.ngenpdb/
 *.user

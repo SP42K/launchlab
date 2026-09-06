@@ -1,0 +1,154 @@
+{
+  "environment": {
+    "generated_at": "2026-09-06T16:23:09",
+    "machine": "DESKTOP-9C3SP52",
+    "os": "Microsoft Windows 11 Pro build 26200.9278",
+    "architecture": "AMD64",
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "logical_cpus": 12,
+    "ram_gb": 31.9,
+    "machine_model": "System manufacturer System Product Name",
+    "virtual_machine": false,
+    "hypervisor_present": true,
+    "system_disk_media": "SSD",
+    "on_ac_power": "no battery (AC)",
+    "defender_realtime": "True",
+    "power_plan": "Power Scheme GUID: 9935e61f-1661-40c5-ae2f-8495027d5d5d  (AMD Ryzen? High Performance)",
+    "wpr_profile": "launchlab.wprp",
+    "cpu_sampling": true,
+    "app_args": "h C:\\lab\\spike.bin",
+    "runs_per_config": 12,
+    "settle_seconds": 2,
+    "interleaved": true,
+    "alternate_tracing": false,
+    "configs": "x64-warm \u003C- C:\\7z-x64\\7z.exe [warm, x64]; x86-warm \u003C- C:\\7z-x86\\7z.exe [warm, x86]"
+  },
+  "configs": [
+    {
+      "config": "x64-warm",
+      "n": 12,
+      "median_ms": 34.02,
+      "mad_ms": 0.8,
+      "p95_ms": 63.48,
+      "cv_percent": 24,
+      "flaky_runs": [
+        "1"
+      ],
+      "components_median_ms": {
+        "cpu_on_ms": 24.92,
+        "cpu_ms": 24.18,
+        "ready_ms": 0.64,
+        "wait_ms": 66.34,
+        "disk_service_ms": 0,
+        "hardfault_io_ms": 0
+      }
+    },
+    {
+      "config": "x86-warm",
+      "n": 12,
+      "median_ms": 36.88,
+      "mad_ms": 1.06,
+      "p95_ms": 77.61,
+      "cv_percent": 29.71,
+      "flaky_runs": [
+        "1"
+      ],
+      "components_median_ms": {
+        "cpu_on_ms": 27.96,
+        "cpu_ms": 27.98,
+        "ready_ms": 0.28,
+        "wait_ms": 70.07,
+        "disk_service_ms": 0,
+        "hardfault_io_ms": 0
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "baseline": "x64-warm",
+      "config": "x86-warm",
+      "delta_median_ms": 2.86,
+      "ratio": 1.08,
+      "hodges_lehmann_ms": 3.05,
+      "component_deltas_ms": {
+        "cpu_on_ms": 3.04,
+        "cpu_ms": 3.8,
+        "ready_ms": -0.36,
+        "wait_ms": 3.73,
+        "disk_service_ms": 0,
+        "hardfault_io_ms": 0
+      },
+      "top_module_movers": {
+        "ntdll.dll": 2.45,
+        "7z.dll": -0.99,
+        "ntoskrnl.exe": 0.98,
+        "vgk.sys": 0.49
+      }
+    }
+  ],
+  "flaky_runs": [
+    {
+      "config": "x64-warm",
+      "run": "1",
+      "startup_ms": 63.48,
+      "delta_vs_median_ms": 29.46,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 96.5
+    },
+    {
+      "config": "x86-warm",
+      "run": "1",
+      "startup_ms": 77.61,
+      "delta_vs_median_ms": 40.73,
+      "top_component": "wait_ms",
+      "top_component_delta_ms": 137.41
+    }
+  ],
+  "attribution": {
+    "module": {
+      "x64-warm": {
+        "ntoskrnl.exe": 11.99,
+        "7z.dll": 7.98,
+        "ntdll.dll": 2.54,
+        "vgk.sys": 0,
+        "dxgkrnl.sys": 0,
+        "cldflt.sys": 0,
+        "Ntfs.sys": 0,
+        "FLTMGR.SYS": 0,
+        "KslD.sys": 0,
+        "advapi32.dll": 0
+      },
+      "x86-warm": {
+        "ntoskrnl.exe": 12.98,
+        "7z.dll": 6.99,
+        "ntdll.dll": 4.99,
+        "vgk.sys": 0.49,
+        "FLTMGR.SYS": 0,
+        "WdFilter.sys": 0,
+        "Ntfs.sys": 0,
+        "combase.dll": 0,
+        "7z.exe": 0,
+        "KernelBase.dll": 0
+      }
+    },
+    "readying": {
+      "x64-warm": {
+        "7z.exe": 55.88,
+        "conhost.exe": 7.27,
+        "MsMpEng.exe": 2.15,
+        "powershell.exe": 0.69,
+        "lsass.exe": 0.31,
+        "csrss.exe": 0.03
+      },
+      "x86-warm": {
+        "7z.exe": 59.57,
+        "conhost.exe": 7.22,
+        "MsMpEng.exe": 2.16,
+        "powershell.exe": 0.65,
+        "lsass.exe": 0.31,
+        "csrss.exe": 0.04,
+        "SearchProtocolHost.exe": 0
+      }
+    }
+  }
+}
