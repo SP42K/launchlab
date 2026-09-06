@@ -40,7 +40,11 @@ param(
 
     # Also stop the XtaCache service and clear C:\Windows\XtaCache before each cold run.
     # Only meaningful on Windows on Arm, and much slower than the fresh-copy trick.
-    [switch]$HardCold
+    [switch]$HardCold,
+
+    # Run the same scenario without starting WPR, to measure what the tracing itself costs.
+    # Produces no traces; appends wall-clock times to overhead.csv for the report to compare.
+    [switch]$NoTrace
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,6 +67,30 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
     [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Add-Utf8NoBom([string]$Path, [string]$Line) {
+    [IO.File]::AppendAllText($Path, $Line + "`n", (New-Object Text.UTF8Encoding($false)))
+}
+
+function Get-PeMachine([string]$Path) {
+    # Read the PE header directly. "Which architecture is this binary?" is the entire premise
+    # of the emulation comparison, so it gets recorded rather than inferred from a folder name.
+    try {
+        $fs = [IO.File]::OpenRead($Path)
+        try {
+            $br = New-Object IO.BinaryReader($fs)
+            $fs.Position = 0x3C
+            $fs.Position = $br.ReadInt32() + 4
+            switch ($br.ReadUInt16()) {
+                0xAA64 { 'ARM64' }
+                0x8664 { 'x64' }
+                0x01C4 { 'ARM32' }
+                0x014C { 'x86' }
+                default { 'unknown' }
+            }
+        } finally { $fs.Dispose() }
+    } catch { 'unknown' }
 }
 
 function Copy-AppDir([string]$ExePath, [string]$Destination) {
@@ -107,26 +135,39 @@ foreach ($entry in $Apps) {
 $os = Get-CimInstance Win32_OperatingSystem
 $cs = Get-CimInstance Win32_ComputerSystem
 $cpu = @(Get-CimInstance Win32_Processor)[0]
+$ubr = try { (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR } catch { '?' }
 $defender = try { (Get-MpComputerStatus).RealTimeProtectionEnabled } catch { 'unknown' }
 $power = try { (powercfg /getactivescheme) -join ' ' } catch { 'unknown' }
+$media = try {
+    $diskNo = (Get-Partition -DriveLetter C -ErrorAction Stop).DiskNumber
+    (Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.DeviceId -eq "$diskNo" }).MediaType
+} catch { 'unknown' }
+$acPower = try {
+    $bat = @(Get-CimInstance Win32_Battery -ErrorAction Stop)
+    if ($bat.Count -eq 0) { 'no battery (AC)' } elseif ($bat[0].BatteryStatus -eq 2) { 'AC' } else { 'battery' }
+} catch { 'unknown' }
 
 $env_ = [ordered]@{
     generated_at    = (Get-Date).ToString('s')
     machine         = $env:COMPUTERNAME
-    os              = "$($os.Caption) build $($os.BuildNumber)"
+    os              = "$($os.Caption) build $($os.BuildNumber).$ubr"
     architecture    = $env:PROCESSOR_ARCHITECTURE
     cpu             = $cpu.Name.Trim()
     logical_cpus    = $cs.NumberOfLogicalProcessors
     ram_gb          = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1)
+    machine_model   = "$($cs.Manufacturer) $($cs.Model)"
     virtual_machine = ($cs.Model -match 'Virtual|VMware|Hyper-V')
+    hypervisor_present = $cs.HypervisorPresent
+    system_disk_media = "$media"
+    on_ac_power     = $acPower
     defender_realtime = "$defender"
     power_plan      = $power.Trim()
-    wpr_profiles    = 'GeneralProfile + DiskIO'
+    wpr_profiles    = $(if ($NoTrace) { 'none (-NoTrace)' } else { 'GeneralProfile + DiskIO' })
     app_args        = $AppArgs
     runs_per_config = $N
     settle_seconds  = $SettleSeconds
     interleaved     = $true
-    configs         = ($configs | ForEach-Object { "$($_.Name) <- $($_.Source) [$($_.Mode)]" }) -join '; '
+    configs         = ($configs | ForEach-Object { "$($_.Name) <- $($_.Source) [$($_.Mode), $(Get-PeMachine $_.Source)]" }) -join '; '
 }
 Write-Utf8NoBom (Join-Path $OutDir 'env.json') ($env_ | ConvertTo-Json -Depth 4)
 
@@ -139,6 +180,9 @@ Write-Host ("estimated wall clock: ~{0:N0} min" -f ($total * ($SettleSeconds + 6
 foreach ($c in $configs | Group-Object Source | ForEach-Object { $_.Group[0] }) {
     if ($AppArgs) { & $c.Source $AppArgs *> $null } else { & $c.Source *> $null }
 }
+
+$overheadCsv = Join-Path $OutDir 'overhead.csv'
+if (-not (Test-Path $overheadCsv)) { Add-Utf8NoBom $overheadCsv 'config,run,traced,wall_ms' }
 
 & $wpr -cancel 2>&1 | Out-Null   # clear any session left behind by an interrupted run
 
@@ -156,8 +200,10 @@ for ($i = 1; $i -le $N; $i++) {
             $exe = $c.WarmCopy
         }
 
-        & $wpr -start GeneralProfile -start DiskIO -filemode
-        if ($LASTEXITCODE -ne 0) { throw "wpr -start failed with $LASTEXITCODE" }
+        if (-not $NoTrace) {
+            & $wpr -start GeneralProfile -start DiskIO -filemode
+            if ($LASTEXITCODE -ne 0) { throw "wpr -start failed with $LASTEXITCODE" }
+        }
 
         $stdout = [IO.Path]::GetTempFileName()
         $stderr = [IO.Path]::GetTempFileName()
@@ -171,10 +217,15 @@ for ($i = 1; $i -le $N; $i++) {
         $sw.Stop()
         Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
 
-        & $wpr -stop $etl
-        if ($LASTEXITCODE -ne 0) { throw "wpr -stop failed with $LASTEXITCODE" }
+        if (-not $NoTrace) {
+            & $wpr -stop $etl
+            if ($LASTEXITCODE -ne 0) { throw "wpr -stop failed with $LASTEXITCODE" }
+        }
 
-        Write-Utf8NoBom "$etl.json" ([ordered]@{
+        # Wall clock of every run, traced or not, so the report can price the tracing itself.
+        Add-Utf8NoBom $overheadCsv ('{0},{1},{2},{3:F3}' -f $c.Name, $i, $(if ($NoTrace) { 0 } else { 1 }), $sw.Elapsed.TotalMilliseconds)
+
+        if (-not $NoTrace) { Write-Utf8NoBom "$etl.json" ([ordered]@{
             config   = $c.Name
             run      = $i
             pid      = $p.Id
@@ -182,7 +233,7 @@ for ($i = 1; $i -le $N; $i++) {
             mode     = $c.Mode
             wall_ms  = [math]::Round($sw.Elapsed.TotalMilliseconds, 3)
             started  = (Get-Date).ToString('s')
-        } | ConvertTo-Json -Compress)
+        } | ConvertTo-Json -Compress) }
 
         Write-Host ("[{0,3}/{1}] {2,-24} pid {3,-6} wall {4,7:N1} ms" -f $done, $total, $c.Name, $p.Id, $sw.Elapsed.TotalMilliseconds)
         Start-Sleep -Seconds $SettleSeconds
