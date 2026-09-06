@@ -68,17 +68,26 @@ static class Stats
         return Median(diffs);
     }
 
-    /// <summary>Indices of runs further than 3 MAD from the median - the flaky ones.</summary>
-    public static List<int> Outliers(IReadOnlyList<double> values, double madMultiple = 3.0)
+    /// <summary>
+    /// Indices of runs that are both statistically and practically far from the median.
+    /// The MAD test alone is useless on a very tight distribution: when MAD is 0.2 ms,
+    /// a run 0.8 ms off the median is "3 MAD out" and nobody cares. A run has to clear
+    /// both bars - relativeFloor as a fraction of the median - before it is called flaky.
+    /// </summary>
+    public static List<int> Outliers(IReadOnlyList<double> values, double madMultiple = 3.0, double relativeFloor = 0.10)
     {
         var result = new List<int>();
         if (values.Count < 4) return result;
         double med = Median(values);
         double mad = Mad(values);
         if (mad <= 0) return result; // Degenerate spread: every deviation would look infinite.
+        double floor = Math.Abs(med) * relativeFloor;
         for (int i = 0; i < values.Count; i++)
-            if (Math.Abs(values[i] - med) > madMultiple * mad)
+        {
+            double deviation = Math.Abs(values[i] - med);
+            if (deviation > madMultiple * mad && deviation > floor)
                 result.Add(i);
+        }
         return result;
     }
 
@@ -95,6 +104,8 @@ static class Stats
         var flaky = Outliers(new double[] { 100, 101, 99, 100, 500 });
         Check(flaky.Count == 1 && flaky[0] == 4, "outlier detected at the right index");
         Check(Outliers(new double[] { 100, 101, 99, 100, 102 }).Count == 0, "no false positive on a tight set");
+        // 3 MAD out but only 1% off the median: statistically odd, practically irrelevant.
+        Check(Outliers(new double[] { 100.0, 100.1, 99.9, 100.0, 101.0 }).Count == 0, "relative floor suppresses trivial deviations");
 
         Console.WriteLine("selftest: all checks passed");
         return 0;

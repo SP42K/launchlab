@@ -25,8 +25,12 @@ param(
     # One or more "label=path" entries naming the executables to compare.
     [string[]]$Apps = @('7z=C:\Program Files\7-Zip\7z.exe'),
 
-    [ValidateSet('warm', 'cold', 'both')]
-    [string]$Mode = 'both',
+    # warm     - one fixed copy of the app, launched repeatedly
+    # coldfile - a fresh copy of the app directory per run: cold file cache for the binary
+    # coldxta  - fixed copy, but C:\Windows\XtaCache is cleared before every run, so an
+    #            emulated x64 binary has to be translated again (Windows on Arm only)
+    [ValidateSet('warm', 'coldfile', 'coldxta')]
+    [string[]]$Mode = @('warm', 'coldfile'),
 
     [int]$N = 20,
 
@@ -38,13 +42,15 @@ param(
 
     [int]$SettleSeconds = 3,
 
-    # Also stop the XtaCache service and clear C:\Windows\XtaCache before each cold run.
-    # Only meaningful on Windows on Arm, and much slower than the fresh-copy trick.
-    [switch]$HardCold,
-
     # Run the same scenario without starting WPR, to measure what the tracing itself costs.
     # Produces no traces; appends wall-clock times to overhead.csv for the report to compare.
-    [switch]$NoTrace
+    [switch]$NoTrace,
+
+    # Recording profile. The default asks for CPU sampling; if the machine refuses it
+    # (virtual machines commonly have no virtualised PMU) the runner falls back to the
+    # no-sampling profile and records that fact in env.json rather than failing.
+    [string]$WprProfile = (Join-Path $PSScriptRoot 'launchlab.wprp'),
+    [string]$WprProfileFallback = (Join-Path $PSScriptRoot 'launchlab-nosampling.wprp')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,7 +64,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     throw 'wpr needs an elevated PowerShell. Re-run this as Administrator.'
 }
 
-$wpr = Join-Path $env:SystemRoot 'System32\wpr.exe'
+$script:wpr = Join-Path $env:SystemRoot 'System32\wpr.exe'
 if (-not (Test-Path $wpr)) { throw "wpr.exe not found at $wpr" }
 
 $OutDir = (New-Item -ItemType Directory -Force -Path $OutDir).FullName
@@ -67,6 +73,19 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
     [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Invoke-Wpr([string[]]$WprArgs) {
+    # Windows PowerShell turns anything a native command writes to stderr into an ErrorRecord,
+    # which is terminating under ErrorActionPreference=Stop. wpr writes there routinely
+    # (-cancel with no session running, for one), so its streams are captured here and the
+    # exit code is returned for the caller to check.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $script:wprOutput = (& $script:wpr @WprArgs 2>&1 | Out-String).Trim()
+        return $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
 }
 
 function Add-Utf8NoBom([string]$Path, [string]$Line) {
@@ -112,7 +131,13 @@ function Clear-XtaCache {
 }
 
 # --- Build the config list ---------------------------------------------------------------
-$modes = if ($Mode -eq 'both') { @('warm', 'cold') } else { @($Mode) }
+$modes = @($Mode)
+if ($modes -contains 'coldxta' -and $modes.Count -gt 1) {
+    # XtaCache is machine-wide. Clearing it between interleaved runs would strip the
+    # translation cache out from under the warm arm too, so the comparison would be
+    # measuring the clearing, not the configuration. Refuse rather than silently mislead.
+    throw 'coldxta clears a machine-wide cache and cannot be interleaved with other modes. Run it as its own invocation (-Mode coldxta) and compare the two runs/csv with: launchlab compare'
+}
 $configs = @()
 foreach ($entry in $Apps) {
     $label, $path = $entry -split '=', 2
@@ -120,7 +145,7 @@ foreach ($entry in $Apps) {
     if (-not (Test-Path $path)) { throw "app not found: $path" }
     foreach ($m in $modes) {
         $name = if ($Apps.Count -eq 1 -and $modes.Count -eq 1) { $label } else { "$label-$m" }
-        $warmCopy = if ($m -eq 'warm') { Copy-AppDir $path (Join-Path $staging "warm-$label") } else { $null }
+        $warmCopy = if ($m -ne 'coldfile') { Copy-AppDir $path (Join-Path $staging "fixed-$label") } else { $null }
         $configs += [pscustomobject]@{
             Name     = $name
             Index    = $configs.Count
@@ -129,6 +154,23 @@ foreach ($entry in $Apps) {
             WarmCopy = $warmCopy
         }
     }
+}
+
+# --- Pick a recording profile the machine will actually accept -----------------------------
+$activeProfile = $WprProfile
+$cpuSampling = $true
+if (-not $NoTrace) {
+    Invoke-Wpr @('-cancel') | Out-Null
+    if ((Invoke-Wpr @('-start', $WprProfile, '-filemode')) -ne 0) {
+        Invoke-Wpr @('-cancel') | Out-Null
+        if ((Invoke-Wpr @('-start', $WprProfileFallback, '-filemode')) -ne 0) {
+            throw "neither recording profile could be started. Last output:`n$script:wprOutput"
+        }
+        $activeProfile = $WprProfileFallback
+        $cpuSampling = $false
+        Write-Warning 'CPU sampling is not available on this machine (no PMU exposed to the guest?). Falling back to the no-sampling profile: cpu_ms and CPU-by-module will be absent.'
+    }
+    Invoke-Wpr @('-cancel') | Out-Null
 }
 
 # --- Environment disclosure ---------------------------------------------------------------
@@ -162,7 +204,8 @@ $env_ = [ordered]@{
     on_ac_power     = $acPower
     defender_realtime = "$defender"
     power_plan      = $power.Trim()
-    wpr_profiles    = $(if ($NoTrace) { 'none (-NoTrace)' } else { 'GeneralProfile + DiskIO' })
+    wpr_profile     = $(if ($NoTrace) { 'none (-NoTrace)' } else { Split-Path -Leaf $activeProfile })
+    cpu_sampling    = $(if ($NoTrace) { $false } else { $cpuSampling })
     app_args        = $AppArgs
     runs_per_config = $N
     settle_seconds  = $SettleSeconds
@@ -177,14 +220,19 @@ Write-Host ("estimated wall clock: ~{0:N0} min" -f ($total * ($SettleSeconds + 6
 
 # One untraced warm-up per app so the very first measured run is not paying for
 # OS-wide first-touch costs that have nothing to do with the config under test.
-foreach ($c in $configs | Group-Object Source | ForEach-Object { $_.Group[0] }) {
-    if ($AppArgs) { & $c.Source $AppArgs *> $null } else { & $c.Source *> $null }
+if ($modes -notcontains 'coldxta') {
+    foreach ($c in $configs | Group-Object Source | ForEach-Object { $_.Group[0] }) {
+        1..3 | ForEach-Object { if ($AppArgs) { & $c.Source $AppArgs *> $null } else { & $c.Source *> $null } }
+    }
+    # XtaCache writes its .JC translation files asynchronously; give it a moment to settle
+    # so the warm arm really is warm.
+    Start-Sleep -Seconds 5
 }
 
 $overheadCsv = Join-Path $OutDir 'overhead.csv'
 if (-not (Test-Path $overheadCsv)) { Add-Utf8NoBom $overheadCsv 'config,run,traced,wall_ms' }
 
-& $wpr -cancel 2>&1 | Out-Null   # clear any session left behind by an interrupted run
+Invoke-Wpr @('-cancel') | Out-Null   # clear any session left behind by an interrupted run
 
 $done = 0
 for ($i = 1; $i -le $N; $i++) {
@@ -193,33 +241,39 @@ for ($i = 1; $i -le $N; $i++) {
         $tag = '{0}-{1}-{2:d3}' -f ('c' + $c.Index), $c.Name, $i
         $etl = Join-Path $OutDir "$tag.etl"
 
-        if ($c.Mode -eq 'cold') {
-            $exe = Copy-AppDir $c.Source (Join-Path $staging "cold-$tag")
-            if ($HardCold) { Clear-XtaCache }
-        } else {
-            $exe = $c.WarmCopy
+        switch ($c.Mode) {
+            'coldfile' { $exe = Copy-AppDir $c.Source (Join-Path $staging "cold-$tag") }
+            'coldxta'  { $exe = $c.WarmCopy; Clear-XtaCache }
+            default    { $exe = $c.WarmCopy }
         }
 
         if (-not $NoTrace) {
-            & $wpr -start GeneralProfile -start DiskIO -filemode
-            if ($LASTEXITCODE -ne 0) { throw "wpr -start failed with $LASTEXITCODE" }
+            $rc = Invoke-Wpr @('-start', $activeProfile, '-filemode')
+            if ($rc -ne 0) { throw "wpr -start failed with $rc`n$script:wprOutput" }
         }
 
-        $stdout = [IO.Path]::GetTempFileName()
-        $stderr = [IO.Path]::GetTempFileName()
+        # Output goes through pipes, never files. Redirecting to a temp file would make the
+        # workload write to disk on the harness's behalf, and that write lands in the
+        # workload's own disk attribution - the measurement tool contaminating its subject.
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        if ($AppArgs) { $psi.Arguments = $AppArgs }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        $p = if ($AppArgs) {
-            Start-Process -FilePath $exe -ArgumentList $AppArgs -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-        } else {
-            Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-        }
+        $p = [Diagnostics.Process]::Start($psi)
+        # Drain before waiting: a full pipe buffer would block the child and be measured as its cost.
+        $p.StandardOutput.ReadToEnd() | Out-Null
+        $p.StandardError.ReadToEnd() | Out-Null
         $p.WaitForExit()
         $sw.Stop()
-        Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
 
         if (-not $NoTrace) {
-            & $wpr -stop $etl
-            if ($LASTEXITCODE -ne 0) { throw "wpr -stop failed with $LASTEXITCODE" }
+            $rc = Invoke-Wpr @('-stop', $etl)
+            if ($rc -ne 0) { throw "wpr -stop failed with $rc`n$script:wprOutput" }
         }
 
         # Wall clock of every run, traced or not, so the report can price the tracing itself.

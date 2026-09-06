@@ -43,6 +43,7 @@ static class Report
         sb.AppendLine($"Generated {DateTime.Now:yyyy-MM-dd HH:mm} from `runs.csv` ({rows.Count} runs, {configs.Length} configs).");
         sb.AppendLine();
 
+        bool cpuSampling = true;
         string envPath = Path.Combine(dir, "env.json");
         if (File.Exists(envPath))
         {
@@ -53,6 +54,16 @@ static class Report
                 sb.AppendLine($"- **{p.Name}**: {p.Value}");
             sb.AppendLine();
             summary["environment"] = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(envPath));
+
+            if (env.RootElement.TryGetProperty("cpu_sampling", out JsonElement cs) &&
+                cs.ValueKind == JsonValueKind.False)
+            {
+                cpuSampling = false;
+                sb.AppendLine("> **CPU sampling was unavailable on this machine**, so `cpu_ms` and the CPU-by-module");
+                sb.AppendLine("> attribution are absent rather than zero. Everything else - scheduling, disk, paging -");
+                sb.AppendLine("> was recorded normally.");
+                sb.AppendLine();
+            }
         }
 
         // --- Startup distribution per config -------------------------------------------------
@@ -113,7 +124,11 @@ static class Report
         sb.AppendLine("## Where the time goes");
         sb.AppendLine();
         sb.AppendLine("Medians per config. **These components overlap** (disk service time is served while the thread waits), " +
-                      "so they rank contributors - they are not an additive budget of `startup_ms`.");
+                      "so they rank contributors - they are not an additive budget of `startup_ms`. " +
+                      "`ready_ms` and `wait_ms` are summed over every thread in the process, so on a multi-threaded " +
+                      "workload they can legitimately exceed the wall-clock `startup_ms`.");
+        if (!cpuSampling) sb.AppendLine();
+        if (!cpuSampling) sb.AppendLine("`cpu_ms` reads 0.0 below only because this machine could not record CPU samples.");
         sb.AppendLine();
         sb.Append("| config |");
         foreach (string c in Components) sb.Append($" {c} |");
@@ -173,8 +188,10 @@ static class Report
         // --- Flaky run attribution -------------------------------------------------------------
         sb.AppendLine("## Flaky runs");
         sb.AppendLine();
-        sb.AppendLine("A run is flagged when it sits further than 3 MAD from its config median. " +
-                      "The attribution is that run's component deltas against the same config's medians.");
+        sb.AppendLine("A run is flagged when it sits further than 3 MAD from its config median **and** more than 10% " +
+                      "off it. The second bar matters: on a tight distribution 3 MAD can be a fraction of a millisecond, " +
+                      "and a run nobody would call flaky would be flagged. The attribution is that run's component " +
+                      "deltas against the same config's medians.");
         sb.AppendLine();
 
         var flakyList = new List<Dictionary<string, object>>();
@@ -209,6 +226,36 @@ static class Report
         if (!anyFlaky) sb.AppendLine("- None. Every run sits within 3 MAD of its config median.");
         sb.AppendLine();
         summary["flaky_runs"] = flakyList;
+
+        // --- What the tracing itself costs ------------------------------------------------------
+        string overheadPath = Path.Combine(dir, "overhead.csv");
+        if (File.Exists(overheadPath))
+        {
+            List<Dictionary<string, string>> oh = ReadCsv(overheadPath);
+            var traced = oh.Where(r => r["traced"] == "1").ToList();
+            var untraced = oh.Where(r => r["traced"] == "0").ToList();
+            if (traced.Count > 0 && untraced.Count > 0)
+            {
+                sb.AppendLine("## What the tracing costs");
+                sb.AppendLine();
+                sb.AppendLine("The same scenario with the recorder off (`-NoTrace`), by harness stopwatch. " +
+                              "Every provider left enabled is overhead charged to the thing being measured, " +
+                              "so it is measured rather than assumed.");
+                sb.AppendLine();
+                sb.AppendLine("| config | median wall_ms traced | median wall_ms untraced | overhead ms | overhead % |");
+                sb.AppendLine("|---|---:|---:|---:|---:|");
+                foreach (string cfg in traced.Select(r => r["config"]).Distinct())
+                {
+                    List<double> on = traced.Where(r => r["config"] == cfg).Select(r => Num(r, "wall_ms")).ToList();
+                    List<double> off = untraced.Where(r => r["config"] == cfg).Select(r => Num(r, "wall_ms")).ToList();
+                    if (off.Count == 0) continue;
+                    double onMed = Stats.Median(on), offMed = Stats.Median(off);
+                    sb.AppendLine($"| {cfg} | {N(onMed)} | {N(offMed)} | {N(onMed - offMed)} | " +
+                                  $"{N(offMed == 0 ? 0 : (onMed - offMed) / offMed * 100)} |");
+                }
+                sb.AppendLine();
+            }
+        }
 
         // --- Attribution: which module, which file, which process ------------------------------
         if (attribRows.Count > 0)

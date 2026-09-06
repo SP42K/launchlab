@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  LaunchLab recording profile.
+
+  Deliberately narrow: only the kernel keywords the analyzer actually reads. Every extra
+  provider is overhead charged to the thing being measured, and this profile is started and
+  stopped once per launch, so it has to be cheap.
+
+    ProcessThread  process/thread create and exit  -> startup_ms
+    Loader         image load                      -> images_loaded, module names
+    CSwitch        context switches                -> wait time
+    ReadyThread    ready events                    -> ready time, who readied whom
+    SampledProfile CPU sampling                    -> CPU by module
+    HardFaults     hard page faults                -> paging cost, by file
+    DiskIO         disk activity                   -> service time, by file
+
+  SampledProfile is unavailable in some virtual machines (no virtualised PMU); the runner
+  falls back to launchlab-nosampling.wprp there and records that in env.json.
+-->
+<WindowsPerformanceRecorder Version="1.0">
+  <Profiles>
+    <SystemCollector Id="LaunchLabCollector" Name="NT Kernel Logger">
+      <BufferSize Value="1024"/>
+      <Buffers Value="64"/>
+    </SystemCollector>
+
+    <SystemProvider Id="LaunchLabProvider">
+      <Keywords>
+        <Keyword Value="ProcessThread"/>
+        <Keyword Value="Loader"/>
+        <Keyword Value="CSwitch"/>
+        <Keyword Value="ReadyThread"/>
+        <Keyword Value="HardFaults"/>
+        <Keyword Value="DiskIO"/>
+      </Keywords>
+    </SystemProvider>
+
+    <Profile Id="LaunchLabNoSampling.Verbose.File" Name="LaunchLabNoSampling" Description="Process startup without CPU sampling (no PMU available)"
+             LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="LaunchLabCollector">
+          <SystemProviderId Value="LaunchLabProvider"/>
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>
