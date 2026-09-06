@@ -78,7 +78,8 @@ $staging = Join-Path $env:TEMP ('launchlab-' + [guid]::NewGuid().ToString('N').S
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
-    [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+    # LF, UTF-8, no BOM. ConvertTo-Json emits CRLF, which git then rewrites on every commit.
+    [IO.File]::WriteAllText($Path, ($Text -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding($false)))
 }
 
 function Invoke-Wpr([string[]]$WprArgs) {
